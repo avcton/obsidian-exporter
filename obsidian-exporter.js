@@ -1,5 +1,6 @@
 import path from "path"
 import fs from "fs/promises"
+import { createHash } from "crypto"
 
 // Constants
 const VAULT_DIR = "/Users/avcton/Mind Palace"
@@ -23,6 +24,18 @@ const copyFileToOutput = async (sourcePath, destinationPath) => {
     } else {
       throw error // Re-throw other errors
     }
+  }
+}
+
+const generateUniqueName = async (filePath) => {
+  try {
+    const fileContent = await fs.readFile(filePath)
+    const hash = createHash("sha256").update(fileContent).digest("hex").substring(0, 8)
+    const parsedPath = path.parse(filePath)
+    return `${parsedPath.name}_${hash}${parsedPath.ext}`
+  } catch (error) {
+    console.error(`Error generating unique name for ${filePath}:`, error)
+    process.exit(1) // Exit the script on error
   }
 }
 
@@ -94,49 +107,121 @@ const resolveFilePath = async (basePath, link) => {
   return path.join(VAULT_DIR, link)
 }
 
-// Resolve and copy attachments to a centralized output folder (references/attachments)
+// Resolve and copy attachments to a single global attachments folder
 const resolveAndCopyAttachments = async (
   attachments,
   basePath,
   outputDir,
   uniqueAttachments,
-  isReference = false,
+  renamedFiles,
 ) => {
+  const globalAttachmentsDir = path.join(outputDir, "attachments")
+
+  try {
+    await fs.access(globalAttachmentsDir)
+  } catch {
+    await fs.mkdir(globalAttachmentsDir)
+  }
+
   for (const attachment of attachments) {
     let resolvedPath = await resolveFilePath(basePath, attachment)
-    let attachmentOutputDir = isReference
-      ? path.join(outputDir, "references", "attachments")
-      : path.join(outputDir, "attachments")
 
     if (!resolvedPath) {
       logWarning(`Attachment not found: ${attachment}`)
       continue
     }
 
-    const destinationPath = path.join(attachmentOutputDir, path.basename(resolvedPath))
+    const resolvedName = path.basename(resolvedPath)
+    let uniqueName = resolvedName
+    let collisionDetected = false
 
-    // Check for duplicates before copying
-    if (!uniqueAttachments.has(destinationPath)) {
-      await copyFileToOutput(resolvedPath, destinationPath)
-      uniqueAttachments.add(destinationPath)
+    // Check if an attachment with the same *content* already exists
+    let existingAttachmentPath = null
+    for (const [existingPath, attachment] of uniqueAttachments) {
+      if (path.basename(existingPath) === resolvedName) {
+        try {
+          const existingFileStats = await fs.stat(existingPath)
+          const currentFileStats = await fs.stat(resolvedPath)
+
+          if (existingFileStats.size === currentFileStats.size) {
+            const existingFileContent = await fs.readFile(existingPath)
+            const currentFileContent = await fs.readFile(resolvedPath)
+            if (existingFileContent.equals(currentFileContent)) {
+              existingAttachmentPath = existingPath
+              uniqueName = path.basename(existingPath)
+              break // Found a match, no need to check further
+            }
+          }
+        } catch (err) {
+          console.error(`Error comparing files: ${err}`)
+        }
+      }
     }
+
+    if (existingAttachmentPath) {
+      console.log(`Attachment already exists (same content): ${attachment}`)
+      continue // Skip copying
+    }
+
+    // Handle name collisions (different content, same name)
+    for (const [existingPath, attachment] of uniqueAttachments) {
+      if (path.basename(existingPath) === resolvedName) {
+        collisionDetected = true
+
+        // Rename the existing file
+        const newExistingName = await generateUniqueName(existingPath)
+        const newExistingPath = path.join(globalAttachmentsDir, newExistingName)
+        await fs.rename(
+          path.join(globalAttachmentsDir, path.basename(existingPath)),
+          newExistingPath,
+        )
+        uniqueAttachments.delete(existingPath)
+        uniqueAttachments.set(newExistingPath, attachment)
+        renamedFiles[attachment] = newExistingName
+        break
+      }
+    }
+
+    const existingCheckRegex = new RegExp(
+      `^${path.parse(resolvedName).name}(_[a-zA-Z0-9]+)?\\.[a-zA-Z0-9]+$`,
+    )
+    collisionDetected = Array.from(uniqueAttachments).some(([existingPath]) =>
+      existingCheckRegex.test(path.basename(existingPath)),
+    )
+
+    // Generate unique name for the *current* file if a collision was detected
+    if (collisionDetected) {
+      uniqueName = await generateUniqueName(resolvedPath)
+      renamedFiles[attachment] = uniqueName // Only add to renamedFiles if renamed
+    }
+
+    const destinationPath = path.join(globalAttachmentsDir, uniqueName)
+    await copyFileToOutput(resolvedPath, destinationPath)
+    uniqueAttachments.set(destinationPath, attachment)
   }
 }
 
-// Resolve and copy linked notes to references folder (flat structure)
+// Resolve and copy linked notes to references folder (preserving hierarchy but no subfolders)
 const resolveAndCopyNotes = async (
   notes,
   basePath,
   outputDir,
+  uniqueAttachments,
   uniqueNotes,
   visitedNotes,
-  inputFolder,
+  renamedFiles,
 ) => {
-  const referenceDir = path.join(outputDir, "references")
+  const referencesFolder = path.join(outputDir, "references")
+
+  try {
+    await fs.access(referencesFolder)
+  } catch {
+    await fs.mkdir(referencesFolder)
+  }
 
   for (const note of notes) {
     if (visitedNotes.has(note)) {
-      continue // Skip already visited notes to avoid infinite recursion
+      continue
     }
 
     visitedNotes.add(note)
@@ -147,38 +232,102 @@ const resolveAndCopyNotes = async (
       continue
     }
 
-    // If the note is outside the input folder, copy it to the references folder
-    if (!resolvedPath.startsWith(inputFolder)) {
-      const destinationPath = path.join(referenceDir, path.basename(resolvedPath))
+    const resolvedName = path.basename(resolvedPath)
 
-      // Check for duplicates before copying
-      if (!uniqueNotes.has(destinationPath)) {
-        await copyFileToOutput(resolvedPath, destinationPath)
-        uniqueNotes.add(destinationPath)
+    // Check if the file is already in the output directory (root level)
+    const relativePathFromOutput = path.relative(outputDir, path.parse(resolvedName).name)
+    if (!relativePathFromOutput.startsWith("..") && !path.isAbsolute(relativePathFromOutput)) {
+      // Note already in output directory
+      uniqueNotes.set(resolvedPath, note)
+      continue
+    }
 
-        // Process the attachments for this note
-        const { attachments } = await parseMarkdownForLinks(resolvedPath)
-        const uniqueAttachments = new Set()
-        await resolveAndCopyAttachments(
-          attachments,
-          resolvedPath,
-          outputDir,
-          uniqueAttachments,
-          true,
-        )
+    let finalPath = path.join(referencesFolder, resolvedName)
+    let uniqueName = resolvedName
+    let collisionDetected = false
 
-        // Recursively resolve and copy nested linked notes
-        const { notes: nestedNotes } = await parseMarkdownForLinks(resolvedPath)
-        await resolveAndCopyNotes(
-          nestedNotes,
-          resolvedPath,
-          outputDir,
-          uniqueNotes,
-          visitedNotes,
-          inputFolder,
-        )
+    // Check if a note with the same *content* already exists
+    let existingNotePath = null
+    for (const [existingPath, note] of uniqueNotes) {
+      if (path.basename(existingPath) === resolvedName) {
+        try {
+          const existingFileStats = await fs.stat(existingPath)
+          const currentFileStats = await fs.stat(resolvedPath)
+
+          if (existingFileStats.size === currentFileStats.size) {
+            const existingFileContent = await fs.readFile(existingPath)
+            const currentFileContent = await fs.readFile(resolvedPath)
+            if (existingFileContent.equals(currentFileContent)) {
+              existingNotePath = existingPath
+              uniqueName = path.basename(existingPath)
+              finalPath = path.join(referencesFolder, path.basename(existingPath))
+              break // Found a match, no need to check further
+            }
+          }
+        } catch (err) {
+          console.error(`Error comparing files: ${err}`)
+        }
       }
     }
+
+    if (existingNotePath) {
+      console.log(`Note already exists (same content): ${note}`)
+      continue // Skip copying
+    }
+
+    // Handle name collisions (different content, same name)
+    const existingEntry = Array.from(uniqueNotes).find(
+      ([existingPath]) => path.basename(existingPath) === resolvedName,
+    )
+
+    const existingCheckRegex = new RegExp(
+      `^${path.parse(resolvedName).name}(_[a-zA-Z0-9]+)?\\.[a-zA-Z0-9]+$`,
+    )
+    collisionDetected = Array.from(uniqueNotes).some(([existingPath]) =>
+      existingCheckRegex.test(path.basename(existingPath)),
+    )
+
+    if (existingEntry) {
+      collisionDetected = true
+      const [existingPath, note] = existingEntry
+      const newExistingName = await generateUniqueName(existingPath)
+      const newExistingPath = path.join(referencesFolder, newExistingName)
+      await fs.rename(path.join(referencesFolder, path.basename(existingPath)), newExistingPath)
+      uniqueNotes.delete(existingPath) // Remove old entry *before* adding the new one
+      uniqueNotes.set(newExistingPath, note)
+      renamedFiles[note] = newExistingName
+    }
+
+    if (collisionDetected) {
+      uniqueName = await generateUniqueName(resolvedPath)
+      finalPath = path.join(referencesFolder, uniqueName)
+      renamedFiles[note] = uniqueName
+    }
+
+    await copyFileToOutput(resolvedPath, finalPath)
+    uniqueNotes.set(finalPath, note)
+
+    // Process attachments for this note
+    const { attachments } = await parseMarkdownForLinks(resolvedPath)
+    await resolveAndCopyAttachments(
+      attachments,
+      resolvedPath,
+      outputDir,
+      uniqueAttachments,
+      renamedFiles,
+    )
+
+    // Recursively resolve and copy nested linked notes
+    const { notes: nestedNotes } = await parseMarkdownForLinks(resolvedPath)
+    await resolveAndCopyNotes(
+      nestedNotes,
+      resolvedPath,
+      outputDir,
+      uniqueAttachments,
+      uniqueNotes,
+      visitedNotes,
+      renamedFiles,
+    )
   }
 }
 
@@ -199,21 +348,115 @@ const findFileInVault = async (vaultDir, fileName) => {
   return null
 }
 
-// Process a single markdown file (No recursion for linked notes)
-const processMarkdownFile = async (filePath, outputDir, visitedNotes, inputFolder) => {
-  const destinationPath = path.join(outputDir, path.basename(filePath))
+// Process a single markdown file
+const processMarkdownFile = async (
+  filePath,
+  outputDir,
+  visitedNotes,
+  inputType,
+  uniqueAttachments,
+  uniqueNotes,
+  renamedFiles,
+) => {
+  const destinationPath =
+    inputType === "file"
+      ? path.join(outputDir, path.basename(filePath)) // Avoid subfolders for single file input
+      : path.join(outputDir, path.relative(VAULT_DIR, filePath))
 
   await copyFileToOutput(filePath, destinationPath)
 
   const { attachments, notes } = await parseMarkdownForLinks(filePath)
 
-  // Resolve and copy attachments for the target note (stored in output/attachments)
-  const uniqueAttachments = new Set()
-  await resolveAndCopyAttachments(attachments, filePath, outputDir, uniqueAttachments)
+  // Resolve and copy attachments
+  await resolveAndCopyAttachments(attachments, filePath, outputDir, uniqueAttachments, renamedFiles)
 
-  // Resolve and copy linked notes (stored in output/references)
-  const uniqueNotes = new Set()
-  await resolveAndCopyNotes(notes, filePath, outputDir, uniqueNotes, visitedNotes, inputFolder)
+  // Resolve and copy notes
+  await resolveAndCopyNotes(
+    notes,
+    filePath,
+    outputDir,
+    uniqueAttachments,
+    uniqueNotes,
+    visitedNotes,
+    renamedFiles,
+  )
+}
+
+// Update links in the processed file
+const updateLinks = async (filePath, renamedFiles) => {
+  let content = await fs.readFile(filePath, "utf8")
+
+  // Update Wikilinks
+  const wikilinkRegex = /\[\[(?![a-zA-Z][a-zA-Z\d+\-.]*:\/\/)(.+?)(?:\|(.+?))?\]\]/g
+  content = content.replace(wikilinkRegex, (match, link, alias) => {
+    const isAttachmentLink = path.extname(link) !== ""
+    const decodedLink = decodeURIComponent(link)
+    const cleanedLink = path.basename(decodedLink) // Remove path from link
+    const updatedLink = decodedLink + (isAttachmentLink ? "" : ".md")
+    let updatedName = renamedFiles[updatedLink] || cleanedLink
+    if (renamedFiles[updatedName]) {
+      // Check if the updated name has been renamed again
+      updatedName = renamedFiles[updatedName]
+    }
+    return alias ? `[[${updatedName}|${alias}]]` : `[[${updatedName}]]` // Keep alias if present
+  })
+
+  // Update Markdown links
+  const markdownLinkRegex = /\[(.+?)\]\((?![a-zA-Z][a-zA-Z\d+\-.]*:\/\/)(.+?)\)/g
+  content = content.replace(markdownLinkRegex, (match, text, link) => {
+    const decodedLink = decodeURIComponent(link)
+    const cleanedLink = path.basename(decodedLink) // Remove path from link
+    let updatedName = renamedFiles[decodedLink] || cleanedLink
+    if (renamedFiles[updatedName]) {
+      // Check if the updated name has been renamed again
+      updatedName = renamedFiles[updatedName]
+    }
+    return `[${text}](${encodeURIComponent(updatedName)})` // Keep displayed text
+  })
+
+  await fs.writeFile(filePath, content, "utf8")
+}
+
+// Process a folder recursively, skipping files and folders starting with '_'
+const processFolder = async (
+  folderPath,
+  outputDir,
+  visitedNotes,
+  uniqueAttachments,
+  uniqueNotes,
+  renamedFiles,
+) => {
+  const files = await fs.readdir(folderPath, { withFileTypes: true })
+
+  for (const file of files) {
+    if (file.name.startsWith("_")) {
+      logWarning(`Skipping file or folder: ${file.name}`)
+      continue
+    }
+
+    const fullPath = path.join(folderPath, file.name)
+
+    if (file.isDirectory()) {
+      await processFolder(
+        fullPath,
+        outputDir,
+        visitedNotes,
+        uniqueAttachments,
+        uniqueNotes,
+        renamedFiles,
+      )
+    } else if (file.name.endsWith(".md")) {
+      await processMarkdownFile(
+        fullPath,
+        outputDir,
+        visitedNotes,
+        "folder",
+        uniqueAttachments,
+        uniqueNotes,
+        renamedFiles,
+      )
+    }
+  }
 }
 
 // Main function to handle user input
@@ -228,22 +471,54 @@ const main = async () => {
   const fullPath = path.join(VAULT_DIR, inputPath)
   const stats = await fs.stat(fullPath)
 
-  // Determine the output directory name dynamically based on input file/folder
+  // Determine the output directory
   const outputDir = path.join(process.cwd(), path.basename(fullPath).replace(/\.md$/, ""))
 
+  console.log(`\nDestination Path: ${outputDir}\n`)
+
   try {
+    const visitedNotes = new Set()
+    const uniqueAttachments = new Map()
+    const uniqueNotes = new Map()
+    const renamedFiles = {}
+
     if (stats.isDirectory()) {
-      const files = await fs.readdir(fullPath)
+      await processFolder(
+        fullPath,
+        outputDir,
+        visitedNotes,
+        uniqueAttachments,
+        uniqueNotes,
+        renamedFiles,
+      )
+    } else if (stats.isFile() && fullPath.endsWith(".md")) {
+      await processMarkdownFile(
+        fullPath,
+        outputDir,
+        visitedNotes,
+        "file",
+        uniqueAttachments,
+        uniqueNotes,
+        renamedFiles,
+      )
+    } else {
+      console.error("Invalid input path. Please provide a valid markdown file or folder.")
+      return
+    }
+    // Update links in all files within the output directory
+    const updateLinksInDirectory = async (dir) => {
+      const files = await fs.readdir(dir, { withFileTypes: true })
       for (const file of files) {
-        if (file.endsWith(".md")) {
-          const visitedNotes = new Set()
-          await processMarkdownFile(path.join(fullPath, file), outputDir, visitedNotes, fullPath)
+        const fullPath = path.join(dir, file.name)
+        if (file.isDirectory()) {
+          await updateLinksInDirectory(fullPath)
+        } else if (file.name.endsWith(".md")) {
+          await updateLinks(fullPath, renamedFiles)
         }
       }
-    } else if (stats.isFile() && fullPath.endsWith(".md")) {
-      const visitedNotes = new Set()
-      await processMarkdownFile(fullPath, outputDir, visitedNotes, path.dirname(fullPath))
     }
+
+    await updateLinksInDirectory(outputDir)
   } catch (err) {
     console.error(`Error: ${err.message}`)
   }
