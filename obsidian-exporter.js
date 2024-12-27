@@ -54,15 +54,15 @@ const parseMarkdownForLinks = async (filePath) => {
     }
   }
 
-  // Match Wikilinks [[...]]
-  const wikilinkRegex = /\[\[(.+?)(?:\|.+?)?\]\]/g
+  // Match Wikilinks [[...]] without URL Schemes, both for attachments and notes
+  const wikilinkRegex = /\[\[(?![a-zA-Z][a-zA-Z\d+\-.]*:\/\/)(.+?)(?:\|.+?)?\]\]/g
   let match
   while ((match = wikilinkRegex.exec(content)) !== null) {
     processLink(match[1])
   }
 
-  // Match standard Markdown links, both for attachments and notes
-  const markdownLinkRegex = /\[(.*?)\]\((.*?)\)/g
+  // Match without URL Schemes Markdown links, both for attachments and notes
+  const markdownLinkRegex = /\[(.*?)\]\((?![a-zA-Z][a-zA-Z\d+\-.]*:\/\/)(.*?)\)/g
   while ((match = markdownLinkRegex.exec(content)) !== null) {
     processLink(match[2])
   }
