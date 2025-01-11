@@ -1,4 +1,4 @@
-A Node.js utility for exporting linked notes and attachments from an Obsidian vault. This script resolves and copies notes, images, and other attachments to a specified output directory, preserving file relationships while minimizing duplication.
+> A Node.js utility for exporting linked notes and attachments from an Obsidian vault. This script resolves and copies notes, images, and other attachments to a specified output directory, preserving file relationships while minimizing duplication.
 
 ## Features
 
