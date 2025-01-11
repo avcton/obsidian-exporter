@@ -1,4 +1,4 @@
-> A Node.js utility for exporting linked notes and attachments from an Obsidian vault. This script resolves and copies notes, images, and other attachments to a specified output directory, preserving file relationships while minimizing duplication.
+A Node.js utility for exporting linked notes and attachments from an Obsidian vault. This script resolves and copies notes, images, and other attachments to a specified output directory, preserving file relationships while minimizing duplication.
 
 ## Features
 
@@ -60,4 +60,4 @@ node obsidian-exporter.js "/Users/avcton/Vault/Projects" "/Users/avcton/Exported
 
 ## Archival Notice
 
-This script served its purpose for a significant time. However, the community plugin [Enveloppe]() has since emerged as a superior alternative, providing similar but more advanced functionality. While I now use [Enveloppe](), I may revisit this script if the plugin becomes unavailable or encounters issues.
+This script served its purpose for a significant time. However, the community plugin [Enveloppe](https://github.com/Enveloppe/obsidian-enveloppe) has since emerged as a superior alternative, providing similar but more advanced functionality. While I now use [Enveloppe](https://github.com/Enveloppe/obsidian-enveloppe), I may revisit this script if the plugin becomes unavailable or encounters issues.
